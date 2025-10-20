@@ -1,0 +1,41 @@
+public static void main() {
+    int x = 10;
+    int y = 20;
+}
+
+
+
+public static void main() {
+    // Operaciones más complejas
+    int a = 10;
+    int b = 20;
+    System.out.println("Suma: " + (a + b));
+    System.out.println("Mayor: " + (a > b));
+    
+    // Condicionales
+    if (a < b) {
+        System.out.println("a es menor que b");
+    }
+    
+    // Variables adicionales
+    int resultado = a + b;
+    System.out.println("Resultado guardado: " + resultado);
+    
+    // Operaciones booleanas
+    boolean esMayor = a > b;
+    System.out.println("a > b: " + esMayor);
+    
+    // Strings
+    String mensaje = "Prueba completa";
+    System.out.println("Mensaje: " + mensaje);
+}
+
+
+unset LD_LIBRARY_PATH
+unset GTK_PATH
+unset GIO_MODULE_DIR
+make clean
+make ./javalang
+./javalang
+
+ env -i HOME="$HOME" PATH="/usr/bin:/bin:/usr/local/bin" DISPLAY="$DISPLAY" ./javalang
