@@ -4,6 +4,7 @@
 #include "../include/gui.h"
 #include "../include/semantic.h"
 #include "../include/codegen_arm64.h"
+#include "../include/codegen_ast.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -273,6 +274,10 @@ static runtime_symbol_t* find_symbol_local(const char *name) {
         }
     }
     return NULL;
+}
+
+int runtime_codegen_generate_from_ast(ast_node *root, const char *out_path) {
+    return codegen_arm64_generate(root, out_path ? out_path : "reports/out_arm64.s");
 }
 
 // Función para buscar/crear variables en la tabla de símbolos
@@ -1443,7 +1448,8 @@ void execute_statement(ast_node *stmt) {
 void execute_program(ast_node *root) {
     if (!root) { runtime_log("❌ No hay programa para ejecutar\n"); return; }
     runtime_log("\n🚀 === INICIANDO EJECUCIÓN === 🚀\n");
-
+    
+    runtime_codegen_generate_from_ast(root, "reports/out_arm64.s");
     /* limpiar estado previo */
     cleanup_runtime();
 

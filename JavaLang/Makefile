@@ -8,7 +8,7 @@ GTK_LIBS = $(shell pkg-config --libs gtk+-3.0)
 LDFLAGS = $(GTK_LIBS) -lfl -lm -Wl,--as-needed
 
 # Lista de todos tus archivos de código fuente
-SRCS = src/main.c src/gui.c src/ast.c src/semantic.c src/runtime.c src/lexer_utils.c src/errores.c src/codegen_arm64.c
+SRCS = src/main.c src/gui.c src/ast.c src/semantic.c src/runtime.c src/lexer_utils.c src/errores.c src/codegen_arm64.c src/codegen_ast.c
 
 # Los archivos generados por Flex y Bison también son fuentes
 GENERATED_SRCS = src/lexer.c src/parser.c
@@ -59,6 +59,10 @@ src/semantic.o: include/parser.h include/ast.h include/semantic.h
 src/runtime.o: include/parser.h include/ast.h include/codegen_arm64.h
 src/codegen_arm64.o: include/codegen_arm64.h
 
+
+#  regla para el generador por AST
+src/codegen_ast.o: src/codegen_ast.c include/codegen_ast.h include/codegen_arm64.h include/ast.h
+	$(CC) $(CFLAGS) -c $< -o $@
 # ----- REGLAS PARA ARCHIVOS GENERADOS (Flex y Bison) -----
 src/lexer.c: src/lexer.l
 	$(FLEX) -o $@ $<

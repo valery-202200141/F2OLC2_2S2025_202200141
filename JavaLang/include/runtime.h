@@ -40,5 +40,6 @@ void rt_println_int(long v);
 void rt_println_double(double v);
 void rt_println_string(const char *s);
 
+int runtime_codegen_generate_from_ast(ast_node *root, const char *out_path);
 
 #endif

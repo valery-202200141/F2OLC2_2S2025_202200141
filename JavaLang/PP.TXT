@@ -1,35 +1,3 @@
-public static void main() {
-    int x = 10;
-    int y = 20;
-}
-
-
-
-public static void main() {
-    // Operaciones más complejas
-    int a = 10;
-    int b = 20;
-    System.out.println("Suma: " + (a + b));
-    System.out.println("Mayor: " + (a > b));
-    
-    // Condicionales
-    if (a < b) {
-        System.out.println("a es menor que b");
-    }
-    
-    // Variables adicionales
-    int resultado = a + b;
-    System.out.println("Resultado guardado: " + resultado);
-    
-    // Operaciones booleanas
-    boolean esMayor = a > b;
-    System.out.println("a > b: " + esMayor);
-    
-    // Strings
-    String mensaje = "Prueba completa";
-    System.out.println("Mensaje: " + mensaje);
-}
-
 
 unset LD_LIBRARY_PATH
 unset GTK_PATH
@@ -39,3 +7,8 @@ make ./javalang
 ./javalang
 
  env -i HOME="$HOME" PATH="/usr/bin:/bin:/usr/local/bin" DISPLAY="$DISPLAY" ./javalang
+
+
+aarch64-linux-gnu-as -o out_arm64.o out_arm64.s
+aarch64-linux-gnu-gcc -no-pie -o out_arm64 out_arm64.o
+qemu-aarch64 -L /usr/aarch64-linux-gnu ./out_arm64
