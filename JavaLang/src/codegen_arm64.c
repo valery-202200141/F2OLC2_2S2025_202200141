@@ -41,6 +41,7 @@ int codegen_arm64_begin(CodegenARM64 *cg, const char *path) {
     asmf(cg, ".global main");
     asmf(cg, ".extern printf");
     asmf(cg, "main:");
+    asmf(cg, "    stp x29, x30, [sp, #-16]!");
     asmf(cg, "    mov x29, sp");
     cg->prologue_emitted = true;
     return 0;
@@ -75,7 +76,8 @@ void codegen_arm64_end(CodegenARM64 *cg) {
 // Helper: emite literal string y devuelve su etiqueta
 static void emit_str_literal(CodegenARM64 *cg, const char *s, char label[32]) {
     snprintf(label, 32, "str_%u", ++cg->str_count);
-    asmf(cg, ".data\n");
+    // CAMBIO: usa ensure_data/ensure_text para mantener el estado de sección
+    ensure_data(cg);
     fprintf(cg->out, "%s: .asciz \"", label);
     for (const unsigned char *p = (const unsigned char*)s; *p; ++p) {
         unsigned char c = *p;
@@ -100,20 +102,19 @@ void codegen_arm64_println_int(CodegenARM64 *cg, long value) {
 }
 
 void codegen_arm64_println_double(CodegenARM64 *cg, double value) {
-    ensure_text(cg);
-    // Colocamos el double en literal pool y lo cargamos en d0
+    // CAMBIO: usa ensure_data/ensure_text
     char lab[32];
     snprintf(lab, 32, "dbl_%u", ++cg->str_count);
-    asmf(cg, ".data\n");
+    ensure_data(cg);
     fprintf(cg->out, "%s: .double %.17g\n", lab, value);
     ensure_text(cg);
 
-    asmf(cg, "    adrp x0, fmt_dbl\n");
-    asmf(cg, "    add  x0, x0, :lo12:fmt_dbl\n");
+    asmf(cg, "    adrp x0, fmt_dbl");
+    asmf(cg, "    add  x0, x0, :lo12:fmt_dbl");
     fprintf(cg->out, "    adrp x1, %s\n", lab);
     fprintf(cg->out, "    add  x1, x1, :lo12:%s\n", lab);
-    asmf(cg, "    ldr  d0, [x1]\n"); // primer arg en x0 (fmt), flotante en d0
-    asmf(cg, "    bl   printf\n");
+    asmf(cg, "    ldr  d0, [x1]");
+    asmf(cg, "    bl   printf");
 }
 
 void codegen_arm64_println_string(CodegenARM64 *cg, const char *utf8) {
@@ -128,26 +129,30 @@ void codegen_arm64_println_string(CodegenARM64 *cg, const char *utf8) {
     asmf(cg, "    bl   printf\n");
 }
 
-
-static void new_label(CodegenARM64 *cg, const char *base, char *buf, size_t n) {
-    snprintf(buf, n, ".L%s_%u", base, ++cg->lbl_count);
-}
-
 // ===== Helpers de locales y control de flujo (pegar al final) =====
 void cg_local_alloc(CodegenARM64 *cg, int bytes){ if(bytes>0){ ensure_text(cg); fprintf(cg->out,"    sub sp, sp, #%d\n",bytes); cg->stack_bytes+=bytes; } }
 void cg_local_free (CodegenARM64 *cg, int bytes){ if(bytes>0){ ensure_text(cg); fprintf(cg->out,"    add sp, sp, #%d\n",bytes); cg->stack_bytes-=bytes; } }
-void cg_store_local_w(CodegenARM64 *cg, int off, const char *wreg){ ensure_text(cg); fprintf(cg->out,"    str %s, [sp, #%d]\n",wreg,off); }
-void cg_load_local_w (CodegenARM64 *cg, int off, const char *wreg){ ensure_text(cg); fprintf(cg->out,"    ldr %s, [sp, #%d]\n",wreg,off); }
+void cg_store_local_w(CodegenARM64 *cg, int off, const char *wreg){
+    ensure_text(cg);
+    // locales estables: base FP (x29), offset NEGATIVO
+    fprintf(cg->out, "    str %s, [x29, #%d]\n", wreg, off);
+}
+
+void cg_load_local_w(CodegenARM64 *cg, int off, const char *wreg){
+    ensure_text(cg);
+    fprintf(cg->out, "    ldr %s, [x29, #%d]\n", wreg, off);
+}
 
 void cg_cmp_int(CodegenARM64 *cg, const char *cond, const char *wa, const char *wb){
     ensure_text(cg);
     fprintf(cg->out,"    cmp %s, %s\n",wa,wb);
-    const char *cc="EQ";
-    if(!strcmp(cond,"==")) cc="EQ"; else if(!strcmp(cond,"!=")) cc="NE";
-    else if(!strcmp(cond,"<")) cc="LT"; else if(!strcmp(cond,"<=")) cc="LE";
-    else if(!strcmp(cond,">")) cc="GT"; else if(!strcmp(cond,">=")) cc="GE";
-    fprintf(cg->out,"    cset w0, %s\n",cc); // booleano en w0
+    const char *cc="eq";
+    if(!strcmp(cond,"==")) cc="eq"; else if(!strcmp(cond,"!=")) cc="ne";
+    else if(!strcmp(cond,"<")) cc="lt"; else if(!strcmp(cond,"<=")) cc="le";
+    else if(!strcmp(cond,">")) cc="gt"; else if(!strcmp(cond,">=")) cc="ge";
+    fprintf(cg->out,"    cset w0, %s\n",cc);
 }
+
 void cg_logical_not(CodegenARM64 *cg){ ensure_text(cg); asmf(cg,"    eor w0, w0, #1\n"); }
 
 void cg_if_begin(CodegenARM64 *cg, char *Lelse, size_t nElse, char *Lend, size_t nEnd){
@@ -173,8 +178,9 @@ void cg_for_begin(CodegenARM64 *cg, char *Lcond, size_t nCond, char *Lstep, size
     ensure_text(cg); fprintf(cg->out,"%s:\n",Lcond); cg_loop_push(cg,Lend,Lstep);
 }
 void cg_for_goto_step(CodegenARM64 *cg, const char *Lstep, const char *Lcond){
+    (void)Lcond;
     ensure_text(cg);
-    fprintf(cg->out,"    b %s\n%s:\n",Lstep,Lcond);
+    fprintf(cg->out, "    b %s\n", Lstep);
 }
 
 void cg_for_step_label(CodegenARM64 *cg, const char *Lstep){

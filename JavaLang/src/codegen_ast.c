@@ -9,6 +9,7 @@ typedef struct {
     int count;
     int scope_mark[64];
     int sp; // scope stack pointer
+    int local_bytes; // ACUMULADO de frame (múltiplos de 16)
 } VarEnv;
 
 static int env_find(VarEnv *e, const char *name){
@@ -17,27 +18,39 @@ static int env_find(VarEnv *e, const char *name){
 }
 static int env_offset(VarEnv *e, const char *name){ int i=env_find(e,name); return i>=0? e->vars[i].off : -1; }
 static void env_push_scope(VarEnv *e){ e->scope_mark[e->sp++] = e->count; }
+
 static int  env_pop_scope(VarEnv *e, CodegenARM64 *cg){
-    int from = e->scope_mark[--e->sp], bytes=0;
-    for (int i=e->count-1;i>=from;--i) bytes += 16; // 16B por var para mantener SP alineado
-    if (bytes) cg_local_free(cg, bytes);
+    int from = e->scope_mark[--e->sp];
+    int nvars = e->count - from;
+    int bytes = nvars > 0 ? nvars * 16 : 0;
+    if (bytes) {
+        cg_local_free(cg, bytes);
+        e->local_bytes -= bytes;
+        if (e->local_bytes < 0) e->local_bytes = 0;
+    }
     e->count = from;
     return bytes;
 }
+
 static int env_decl_int(VarEnv *e, CodegenARM64 *cg, const char *name){
     if (e->count>=256) return -1;
-    cg_local_alloc(cg, 16); // reserva 16B por variable (alineación)
-    int off = 0; // la var más reciente vive en [sp,#0]
-    for (int i=0;i<e->count;++i) e->vars[i].off += 16; // desplazar offsets existentes
+    cg_local_alloc(cg, 16);
+    e->local_bytes += 16;
+    int off = -e->local_bytes;  // [x29,#off] NEGATIVO
     strncpy(e->vars[e->count].name, name, sizeof(e->vars[e->count].name)-1);
     e->vars[e->count].name[sizeof(e->vars[e->count].name)-1]='\0';
     e->vars[e->count].off = off;
     e->count++;
+    fprintf(cg->out, "    // decl %s @ [x29,#%d]\n", name, off);
     return off;
 }
 
 // Convención: expr int/bool deja resultado en w0
 static void gen_expr(CodegenARM64 *cg, VarEnv *env, ast_node *n);
+
+// Convención: stmt no deja nada
+static void gen_stmt(CodegenARM64 *cg, VarEnv *env, ast_node *s);
+
 
 static int is_intish(ast_node *n){
     if (!n) return 0;
@@ -97,12 +110,15 @@ static void gen_binop(CodegenARM64 *cg, VarEnv *env, ast_node *n){
         }
         case OP_OR: {
             fprintf(cg->out, "    mov w0, w1\n");
-            char Lend[32]; snprintf(Lend,sizeof Lend,".Lor_%u", ++cg->lbl_count);
-            fprintf(cg->out, "    cbnz w0, %s\n", Lend);
+            char Ltrue[32]; snprintf(Ltrue,sizeof Ltrue,".Lor_true_%u", ++cg->lbl_count);
+            char Lend [32]; snprintf(Lend ,sizeof Lend ,".Lor_end_%u",  cg->lbl_count);
+            fprintf(cg->out, "    cbnz w0, %s\n", Ltrue);
             gen_expr(cg, env, n->data.op.right);
             fprintf(cg->out, "    and w0, w0, #1\n");
-            fprintf(cg->out, "%s:\n", Lend);
+            fprintf(cg->out, "    b %s\n", Lend);
+            fprintf(cg->out, "%s:\n", Ltrue);
             fprintf(cg->out, "    mov w0, #1\n");
+            fprintf(cg->out, "%s:\n", Lend);
             break;
         }
         default:
@@ -121,8 +137,13 @@ static void gen_expr(CodegenARM64 *cg, VarEnv *env, ast_node *n){
             break;
         case AST_VARIABLE: {
             int off = env_offset(env, n->data.var_name);
-            if (off < 0){ fprintf(cg->out,"    mov w0, wzr\n"); break; }
-            fprintf(cg->out, "    ldr w0, [sp, #%d]\n", off);
+            if (off < 0){
+                fprintf(cg->out,"    // WARN: var not found '%s'\n", n->data.var_name);
+                fprintf(cg->out,"    mov w0, wzr\n");
+            } else {
+                fprintf(cg->out,"    // load %s @ [x29,#%d]\n", n->data.var_name, off);
+                cg_load_local_w(cg, off, "w0");
+            }
             break;
         }
         case AST_BINARY_OP:
@@ -144,7 +165,6 @@ static void gen_expr(CodegenARM64 *cg, VarEnv *env, ast_node *n){
     }
 }
 
-static void gen_stmt(CodegenARM64 *cg, VarEnv *env, ast_node *s);
 
 static void gen_block(CodegenARM64 *cg, VarEnv *env, ast_node *list){
     env_push_scope(env);
@@ -161,17 +181,28 @@ static void gen_stmt(CodegenARM64 *cg, VarEnv *env, ast_node *s){
             int off = env_decl_int(env, cg, s->data.declaration.var_name);
             if (s->data.declaration.value && off>=0){
                 gen_expr(cg, env, s->data.declaration.value);
-                fprintf(cg->out, "    str w0, [sp, #%d]\n", off);
+                fprintf(cg->out, "    // store %s\n", s->data.declaration.var_name);
+                cg_store_local_w(cg, off, "w0");
+            } else if (off>=0){
+                fprintf(cg->out, "    mov w0, wzr\n");
+                cg_store_local_w(cg, off, "w0");
             }
             break;
         }
+
         case AST_ASSIGNMENT: {
             int off = env_offset(env, s->data.assignment.var_name);
-            if (off < 0){ off = env_decl_int(env, cg, s->data.assignment.var_name); }
+            if (off < 0){
+                off = env_decl_int(env, cg, s->data.assignment.var_name);
+                fprintf(cg->out,"    // auto-decl %s\n", s->data.assignment.var_name);
+            } else {
+                fprintf(cg->out,"    // assign %s @ [x29,#%d]\n", s->data.assignment.var_name, off);
+            }
             gen_expr(cg, env, s->data.assignment.value);
-            fprintf(cg->out, "    str w0, [sp, #%d]\n", off);
+            cg_store_local_w(cg, off, "w0");
             break;
         }
+
         case AST_IF: {
             gen_expr(cg, env, s->data.if_stmt.condition);
             char Lelse[32], Lend[32];
@@ -180,6 +211,8 @@ static void gen_stmt(CodegenARM64 *cg, VarEnv *env, ast_node *s){
             if (s->data.if_stmt.else_branch){
                 cg_if_else(cg, Lelse, Lend);
                 gen_stmt(cg, env, s->data.if_stmt.else_branch);
+            } else {
+                cg_label(cg, Lelse);
             }
             cg_if_end(cg, Lend);
             break;

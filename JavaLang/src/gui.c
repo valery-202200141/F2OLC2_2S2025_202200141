@@ -259,13 +259,13 @@ static gpointer execute_worker(gpointer data) {
             semantic_analysis(ast_root);
             append_to_console_threadsafe("🔍 Ejecutando programa...\n");
             // --- INICIAR ARM64 .s AQUÍ ---
-            system("mkdir -p reports");
-            runtime_codegen_start("reports/out_arm64.s");
+            // system("mkdir -p reports");
+            // runtime_codegen_start("reports/out_arm64.s");
 
             execute_program(ast_root);
              // --- CERRAR ARM64 .s AQUÍ ---
-            runtime_codegen_finish();
-            append_to_console_threadsafe("✅ Código ARM64 generado: reports/out_arm64.s\n");
+            //runtime_codegen_finish();
+            //append_to_console_threadsafe("✅ Código ARM64 generado: reports/out_arm64.s\n");
         } else {
             append_to_console_threadsafe("⚠️ No hay AST disponible para ejecución\n");
         }

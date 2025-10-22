@@ -1,51 +1,11 @@
-❌ Método .equals() - No implementado
-❌ Operaciones lógicas complejas - Parsing incompleto
-❌ Concatenación múltiple - Puede fallar
-❌ Operador != complejo - Necesita verificación
-
-
-
-1. Soporte robusto de llamadas a funciones/recursión
-
-2. Que el runtime ejecute llamadas a funciones definidas por el usuario, pase parámetros, maneje retornos y pila de llamadas (recursión). Si tu runtime ya soporta eso, confirma con un ejemplo pequeño (función sumadora).
-Literales y escapes
-
-3. Que el lexer convierta las secuencias como "\n" a salto real (ya lo sugerí). Eso no afecta BASICO.usl si lo haces en lexer para todos los literales.
-Métodos y utilidades de librería (implementar como builtins)
-    Integer.parseInt(String)
-    Double.parseDouble(String)
-    String.valueOf(...)
-    String.join(delim, List)
-    Arrays.asList(...)
-    System.out.println / concatenación con + Implementarlos como funciones built-in en el runtime. No cambiarán BASICO.usl si tu código solo detecta llamadas a esos nombres y las resuelve.
-    
-4. Colecciones y operaciones sobre listas
-Estructura runtime para List/ArrayList (size, get, add, indexOf). Puede ser mínima (vector dinámico C) solo para pasar las pruebas de ejemplos.
-
-5. Arrays Java y propiedad length
-
-Crear arrays (new int[] {...}) y exponer arr.length.
-
-6. Igualdad y métodos de String usados en el ejemplo
-
-equals, toString y comportamiento esperado de println.
-
-
-Prioridad para implementar (rápida, no rompe BASICO):
-
-A: Integer.parseInt, Double.parseDouble, String.valueOf, System.out.println, escapes en lexer.
-B: Arrays.asList + minimal List (get, size, indexOf, add).
-C: String.join (usa la List anterior) y arr.length / new arrays.
-
-
-
-1. Falta manejo de la expresión new int[]{ ... } en evaluate_expression (RHS de declaraciones/assigns). Actualmente solo se crea arrays desde la rama de declaración (AST_ARRAY_DECLARATION) usando runtime_array_from_init_list, pero no hay soporte genérico para la expresión AST_NEW_ARRAY / AST_NEW_ARRAY_INIT. Ver: runtime_array_from_init_list.
-2. Arreglos multidimensionales (int[][]) no están representados en runtime: runtime_array_t solo soporta int[] planos.
-3. arr.length (propiedad length) no está implementado como acceso/propiedad en evaluate_expression o en la resolución de miembros del AST (ast.h define estructuras relevantes).
-4. Funciones/utilidades usadas por el ejemplo no están implementadas: Arrays.toString / Arrays.deepToString, Arrays.asList, String.join, ArrayList y métodos (add, addAll, size, get, indexOf). El ejemplo usa todas esas APIs.
-5. Concatenación/string: hay muchas ramas incompletas (p. ej. OP_PLUS string handling, is_string_expression, get_string_value, convert_to_string) en [JavaLang/src/runtime.c]; eso afectará System.out.println(...) y comprobaciones equals.
-6. Algunas ramas de operadores/comparaciones están truncadas (hay muchos … en el archivo), por lo que condiciones y comparaciones podrían fallar.
-
+Aritméticas: sí (int). Faltan float/double por AST.
+Relacionales: sí (cmp + cset).
+Lógicas: sí (NOT ok, AND ok, OR con bug a corregir).
+Control de flujo: if/while/for/break/continue sí, vía helpers.
+Funciones: helpers existen, pero el AST no emite defs/llamadas/param passing.
+Memoria/stack: sí para locales; prologue/epilogue correctos. Heap/arrays no en ARM64 (solo en intérprete).
+Switch: helpers implementados, pero no integrados en codegen_ast.c.
+Strings: solo literals via printf; no concatenación ni equals en AST.
 
 
 aarch64-linux-gnu-as -o out_arm64.o out_arm64.s
