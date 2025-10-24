@@ -1,27 +1,80 @@
 #include "../include/codegen_ast.h"
+#include <ctype.h>
 #include <string.h>
 #include <stdio.h>
 
 
 static void sanitize_name(const char *src, char *dst, size_t n);
 
-// Entorno de variables locales (stack en [sp])
-typedef struct { char name[64]; int off; } LocalVar;
+
+// --------- Entorno de variables locales ----------
+typedef struct { 
+    char name[64]; 
+    int  off;      // offset negativo relativo a x29
+} LocalVar;
+
 typedef struct {
     LocalVar vars[256];
     int count;
-    int scope_mark[64];
-    int sp; // scope stack pointer
-    int local_bytes; // ACUMULADO de frame (múltiplos de 16)
+    int local_bytes;     // bytes reservados en el frame (múltiplos de 16)
+    int scope_mark[256]; // pila de marcas de scope
+    int sp;              // puntero de pila de scopes
 } VarEnv;
 
-static int env_find(VarEnv *e, const char *name){
-    // Busca usando nombre saneado contra el nombre almacenado (que ya está saneado)
-    char key[64]; sanitize_name(name ? name : "", key, sizeof(key));
-    if (!key[0]) return -1;
-    for (int i = e->count - 1; i >= 0; --i){
-        if (strcmp(e->vars[i].name, key) == 0) return i;
+// Inicializa entorno (si no existe ya)
+static void env_init(VarEnv *e){
+    if (!e) return;
+    e->count = 0;
+    e->local_bytes = 0;
+    e->sp = 0; // init stack de scopes
+}
+
+static void env_push_scope(VarEnv *e){
+    if (e->sp < (int)(sizeof(e->scope_mark)/sizeof(e->scope_mark[0]))) {
+        e->scope_mark[e->sp++] = e->count;
     }
+}
+
+static int env_pop_scope(VarEnv *e, CodegenARM64 *cg){
+    (void)cg;
+    if (e->sp > 0) {
+        int from = e->scope_mark[--e->sp];
+        e->count = from;
+    }
+    return 0;
+}
+
+// Declara int local y guarda nombre normalizado
+static int env_decl_int(VarEnv *e, CodegenARM64 *cg, const char *raw_name){
+    if (!e || e->count >= 256) return -1;
+    char key[64]; sanitize_name(raw_name ? raw_name : "", key, sizeof key);
+
+    e->local_bytes += 16;
+    int off = -e->local_bytes; // offsets negativos relativos a x29
+    strncpy(e->vars[e->count].name, key, sizeof(e->vars[e->count].name)-1);
+    e->vars[e->count].name[sizeof(e->vars[e->count].name)-1] = '\0';
+    e->vars[e->count].off = off;
+    e->count++;
+
+    fprintf(cg->out, "    // decl %s @ [x29,#%d]\n", key[0]?key:"(anon)", off);
+    return off;
+}
+
+static void ident_norm(char *dst, size_t ndst, const char *src){
+    size_t j = 0;
+    for (size_t i=0; src && src[i] && j+1<ndst; ++i){
+        unsigned char c = (unsigned char)src[i];
+        if (!isspace(c)) dst[j++] = c;   // quita espacios/tab/newline ASCII
+    }
+    dst[j] = '\0';
+}
+
+// Busca índice por nombre, usando el mismo saneo con el que se almacena
+static int env_find(VarEnv *e, const char *name){
+    char key[64]; sanitize_name(name ? name : "", key, sizeof key);
+    if (!key[0]) return -1;
+    for (int i = e->count - 1; i >= 0; --i)
+        if (strcmp(e->vars[i].name, key) == 0) return i;
     return -1;
 }
 
@@ -62,66 +115,69 @@ static int count_decls_in_node(ast_node *n){
     return c;
 }
 
+static void dump_hex(const char *tag, const char *s){
+    if(!s){ fprintf(stderr,"%s: <null>\n",tag); return; }
+    fprintf(stderr,"%s: '", tag);
+    for (const unsigned char *p=(const unsigned char*)s; *p; ++p) fputc(*p, stderr);
+    fprintf(stderr,"'  [");
+    for (const unsigned char *p=(const unsigned char*)s; *p; ++p){
+        fprintf(stderr,"%s%02X", (p==(const unsigned char*)s)?"":" ", *p);
+    }
+    fprintf(stderr,"]\n");
+}
 
 static int env_offset(VarEnv *e, const char *name){ int i=env_find(e,name); return i>=0? e->vars[i].off : -1; }
 
 // Añade un find/offset robusto
+// Lookup robusto: normalizado primero, luego raw como fallback (por si algo quedó sin normalizar)
 static int env_offset_strict(VarEnv *e, CodegenARM64 *cg, const char *raw_name){
-    if (!raw_name) return -1;
-    char nm[64]; sanitize_name(raw_name, nm, sizeof(nm));
-    if (!nm[0]) return -1;
+    if (!e || !raw_name) return -1;
+    char key[64]; sanitize_name(raw_name, key, sizeof key);
 
-    // 1) match directo con nombre almacenado (ya saneado)
     for (int i = e->count - 1; i >= 0; --i){
-        if (strcmp(e->vars[i].name, nm) == 0) return e->vars[i].off;
+        if (strcmp(e->vars[i].name, key) == 0) return e->vars[i].off;
     }
-    // 2) por si acaso, compara contra raw (por si el almacenado llegó sin saneo en algún caso)
     for (int i = e->count - 1; i >= 0; --i){
         if (strcmp(e->vars[i].name, raw_name) == 0) return e->vars[i].off;
     }
 
-    // Diagnóstico
-    fprintf(cg->out, "    // LOOKUP FAIL raw='%s' san='%s'. En entorno hay:\n", raw_name, nm);
-    for (int i = 0; i < e->count; ++i) {
+    // Diagnóstico visible en el .s
+    fprintf(cg->out, "    // LOOKUP FAIL raw='%s' san='%s' (count=%d)\n", raw_name, key, e->count);
+    for (int i=0;i<e->count;++i){
         fprintf(cg->out, "    //   [%d] name='%s' off=%d\n", i, e->vars[i].name, e->vars[i].off);
     }
     return -1;
 }
 
 
-static void env_push_scope(VarEnv *e){ e->scope_mark[e->sp++] = e->count; }
-
 static inline int align16(int n){ return (n + 15) & ~15; }
 
-static int  env_pop_scope(VarEnv *e, CodegenARM64 *cg){
-    // Ya NO movemos SP; solo olvidamos nombres fuera de scope
-    (void)cg;
-    int from = e->scope_mark[--e->sp];
-    e->count = from;
-    return 0;
-}
 
 static void env_dump(CodegenARM64 *cg, VarEnv *e, const char *tag){
     if (!cg || !e) return;
-    fprintf(cg->out, "    // ENV DUMP [%s] count=%d local_bytes=%d\n", tag, e->count, e->local_bytes);
-    for (int i = 0; i < e->count; ++i){
+    fprintf(cg->out, "    // ENV DUMP [%s] count=%d local_bytes=%d\n",
+            tag?tag:"", e->count, e->local_bytes);
+    for (int i=0;i<e->count;i++){
         fprintf(cg->out, "    //   #%d name='%s' off=%d\n", i, e->vars[i].name, e->vars[i].off);
     }
 }
 
+// Normaliza: quita espacios/control y deja [A-Za-z0-9_]
 static void sanitize_name(const char *src, char *dst, size_t n){
     size_t j=0;
     if (!dst || n==0){ return; }
     if (!src){ dst[0]='\0'; return; }
     for (size_t i=0; src[i] && j+1<n; ++i){
         unsigned char c = (unsigned char)src[i];
+        if (isspace(c)) continue;
         if ((c>='A' && c<='Z') || (c>='a' && c<='z') || (c>='0' && c<='9') || c=='_'){
             dst[j++] = (char)c;
         }
-        // ignora cualquier otro caracter (espacios, ;, NBSP, etc.)
+        // ignora otros
     }
     dst[j] = '\0';
 }
+
 
 static int is_print_like_call(ast_node *call){
     if (!call || call->type != AST_METHOD_CALL) return 0;
@@ -130,23 +186,6 @@ static int is_print_like_call(ast_node *call){
     return strcmp(m, "println") == 0 || strcmp(m, "print") == 0;
 }
 
-static int env_decl_int(VarEnv *e, CodegenARM64 *cg, const char *name){
-    if (e->count>=256) return -1;
-    char nm[64]; sanitize_name(name ? name : "", nm, sizeof(nm));
-    if (!nm[0]) {
-        fprintf(cg->out, "    // ERROR: nombre de variable vacío en declaración, se omite\n");
-        return -1;
-    }
-    e->local_bytes += 16;
-    int off = -e->local_bytes;
-    strncpy(e->vars[e->count].name, nm, sizeof(e->vars[e->count].name)-1);
-    e->vars[e->count].name[sizeof(e->vars[e->count].name)-1]='\0';
-    e->vars[e->count].off = off;
-    e->count++;
-    fprintf(cg->out, "    // decl %s @ [x29,#%d]\n", nm, off);
-    env_dump(cg, e, "after-decl");
-    return off;
-}
 
 // Convención: expr int/bool deja resultado en w0
 static void gen_expr(CodegenARM64 *cg, VarEnv *env, ast_node *n);
@@ -184,11 +223,11 @@ static void gen_print_cstr(CodegenARM64 *cg, const char *s){
 }
 
 static void gen_binop(CodegenARM64 *cg, VarEnv *env, ast_node *n){
-    // left -> w0; push; right -> w0; pop w1; op w0 = w1 (op) w0
-    gen_expr(cg, env, n->data.op.left);
-    cg_push_w(cg, "w0");
-    gen_expr(cg, env, n->data.op.right);
-    cg_pop_w(cg, "w1");
+    // left -> w1 ; right -> w0 ; resultado en w0
+    gen_expr(cg, env, n->data.op.left);           // -> w0
+    fprintf(cg->out, "    mov w1, w0\n");         // w1 = left
+    gen_expr(cg, env, n->data.op.right);          // -> w0 (right)
+
     switch(n->data.op.op){
         case OP_PLUS:   fprintf(cg->out, "    add w0, w1, w0\n"); break;
         case OP_MINUS:  fprintf(cg->out, "    sub w0, w1, w0\n"); break;
@@ -198,12 +237,16 @@ static void gen_binop(CodegenARM64 *cg, VarEnv *env, ast_node *n){
             fprintf(cg->out, "    sdiv w9, w1, w0\n");
             fprintf(cg->out, "    msub w0, w9, w0, w1\n"); // w0 = w1 - (w1/w0)*w0
             break;
+
+        // Relacionales -> booleano en w0
         case OP_EQUALS:         cg_cmp_int(cg, "==", "w1", "w0"); break;
         case OP_NOT_EQUALS:     cg_cmp_int(cg, "!=", "w1", "w0"); break;
         case OP_LESS:           cg_cmp_int(cg, "<",  "w1", "w0"); break;
         case OP_LESS_EQUALS:    cg_cmp_int(cg, "<=", "w1", "w0"); break;
         case OP_GREATER:        cg_cmp_int(cg, ">",  "w1", "w0"); break;
-        case OP_GREATER_EQUALS: cg_cmp_int(cg, ">=","w1","w0"); break;
+        case OP_GREATER_EQUALS: cg_cmp_int(cg, ">=", "w1","w0"); break;
+
+        // Lógicos con short-circuit
         case OP_AND: {
             fprintf(cg->out, "    mov w0, w1\n");
             char Lend[32]; snprintf(Lend,sizeof Lend,".Land_%u", ++cg->lbl_count);
@@ -232,9 +275,10 @@ static void gen_binop(CodegenARM64 *cg, VarEnv *env, ast_node *n){
 }
 
 
+
 static void gen_expr(CodegenARM64 *cg, VarEnv *env, ast_node *n){
     if (!n){ fprintf(cg->out,"    mov w0, wzr\n"); return; }
-    switch(n->type){
+        switch(n->type){
         case AST_INT_LITERAL:
             fprintf(cg->out, "    mov w0, #%d\n", n->data.int_value);
             break;
@@ -242,10 +286,12 @@ static void gen_expr(CodegenARM64 *cg, VarEnv *env, ast_node *n){
             fprintf(cg->out, "    mov w0, #%d\n", n->data.bool_value ? 1 : 0);
             break;
         case AST_VARIABLE: {
-            env_dump(cg, env, "before-load");
             const char *raw = n->data.var_name ? n->data.var_name : "";
-            int off = env_offset_strict(env, cg, raw);  // usar raw aquí
-            if (off < 0){
+            char key[64]; sanitize_name(raw, key, sizeof key);
+            fprintf(cg->out, "    // CG_VAR raw='%s' san='%s'\n", raw, key);  // <--- MARCA
+
+            int off = env_offset_strict(env, cg, raw);
+            if (off == -1){
                 fprintf(cg->out,"    // WARN: var not found '%s'\n", raw);
                 fprintf(cg->out,"    mov w0, wzr\n");
             } else {
@@ -254,7 +300,6 @@ static void gen_expr(CodegenARM64 *cg, VarEnv *env, ast_node *n){
             }
             break;
         }
-
         case AST_BINARY_OP:
             gen_binop(cg, env, n);
             break;
@@ -287,36 +332,27 @@ static void gen_stmt(CodegenARM64 *cg, VarEnv *env, ast_node *s){
     if (!s) return;
     switch(s->type){
         case AST_DECLARATION: {
+            // Asegura prologue de frame si gestionas frame_size aquí
             int off = env_decl_int(env, cg, s->data.declaration.var_name);
-            // inicializa (0 si no hay valor)
             if (s->data.declaration.value){
+                // evalúa RHS y guarda
                 gen_expr(cg, env, s->data.declaration.value);
                 cg_store_local_w(cg, off, "w0");
             } else {
                 fprintf(cg->out, "    mov w0, wzr\n");
                 cg_store_local_w(cg, off, "w0");
             }
-            // dump opcional
-            fprintf(cg->out, "    // ENV DUMP [after-decl-store] count=%d local_bytes=%d\n", env->count, env->local_bytes);
-            for (int i=0;i<env->count;i++){
-                fprintf(cg->out, "    //   #%d name='%s' off=%d\n", i, env->vars[i].name, env->vars[i].off);
-            }
+            env_dump(cg, env, "after-decl-store");
             break;
         }
         case AST_ASSIGNMENT: {
             env_dump(cg, env, "before-assign");
             const char *raw = s->data.assignment.var_name ? s->data.assignment.var_name : "";
-            char nm[64]; sanitize_name(raw, nm, sizeof(nm));
-            if (!nm[0]) {
-                fprintf(cg->out,"    // ERROR: nombre de variable vacío en asignación\n");
+            int off = env_offset_strict(env, cg, raw);
+            if (off == -1){
+                fprintf(cg->out, "    // ERROR: var not found for assign '%s' (no auto-decl)\n", raw);
                 break;
             }
-            int off = env_offset_strict(env, cg, raw); // usar raw aquí también
-            if (off < 0){
-                fprintf(cg->out,"    // ERROR: var not found for assign '%s' (no auto-decl)\n", nm);
-                break;
-            }
-            fprintf(cg->out,"    // assign %s @ [x29,#%d]\n", nm, off);
             gen_expr(cg, env, s->data.assignment.value);
             cg_store_local_w(cg, off, "w0");
             env_dump(cg, env, "after-assign");
@@ -361,6 +397,43 @@ static void gen_stmt(CodegenARM64 *cg, VarEnv *env, ast_node *s){
             cg_for_end(cg, Lcond, Lend);
             break;
         }
+
+        /*case AST_SWITCH: {
+            // evalúa selector -> w0
+            gen_expr(cg, env, s->data.switch_stmt.expr);
+
+            char Lend[32], Ldef[32];
+            cg_switch_begin(cg, Lend, sizeof Lend, Ldef, sizeof Ldef);
+
+            // Emite comparaciones por cada case (no default)
+            for (ast_node *c = s->data.switch_stmt.cases; c; c = c->next) {
+                if (c->data.case_stmt.is_default) continue;
+                // value inmediato (si es literal) o eval expr a w0 y usa registro temporal si tu helper lo requiere
+                // Aquí asumimos literal entero:
+                char Lcase[32]; snprintf(Lcase, sizeof Lcase, ".Lcase_%u", ++cg->lbl_count);
+                cg_switch_case_imm(cg, evaluate_expression(c->data.case_stmt.value), Lcase);
+                cg_label(cg, Lcase);
+                if (c->data.case_stmt.body) gen_stmt(cg, env, c->data.case_stmt.body);
+                // fall-through (no jump) hasta que un break emita salto a Lend
+            }
+
+            // default: si existe, etiquétalo; si no, usa label ya creado
+            int has_default = 0;
+            for (ast_node *c = s->data.switch_stmt.cases; c; c = c->next) {
+                if (c->data.case_stmt.is_default) {
+                    has_default = 1;
+                    cg_label(cg, Ldef);
+                    if (c->data.case_stmt.body) gen_stmt(cg, env, c->data.case_stmt.body);
+                    break;
+                }
+            }
+            if (!has_default) cg_label(cg, Ldef);
+
+            cg_switch_goto_end(cg, Lend);
+            cg_label(cg, Lend);
+            break;
+        }*/
+
         case AST_BREAK:    cg_emit_break(cg); break;
         case AST_CONTINUE: cg_emit_continue(cg); break;
         case AST_RETURN:   cg_return_void(cg); break;
@@ -418,7 +491,7 @@ static void gen_stmt(CodegenARM64 *cg, VarEnv *env, ast_node *s){
 int codegen_arm64_generate(ast_node *root, const char *out_path){
     CodegenARM64 cg;
     if (codegen_arm64_begin(&cg, out_path?out_path:"reports/out_arm64.s") != 0) return -1;
-
+    fprintf(cg.out, "    // CG_TAG: build %s %s\n", __DATE__, __TIME__);  // <--- MARCA
     // Seleccionar body ejecutable (fix: asigna realmente body)
     ast_node *body = root;
     if (root && (root->type==AST_PROGRAM || root->type==AST_MAIN_FUNCTION) && root->data.function_def.body) {

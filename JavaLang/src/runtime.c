@@ -1268,6 +1268,45 @@ void execute_statement(ast_node *stmt) {
             runtime_break_flag = 0; runtime_continue_flag = 0;
              break;
         }
+
+        /*case AST_SWITCH: {
+            // Ajusta nombres de campos a tu AST:
+            // stmt->data.switch_stmt.expr        -> expresión switch (int)
+            // stmt->data.switch_stmt.cases       -> lista de 'case' (cada nodo es AST_CASE)
+            // case_node->data.case_stmt.is_default (bool)
+            // case_node->data.case_stmt.value     (int literal o expr)
+            // case_node->data.case_stmt.body      (ast_node* statements)
+            int key = evaluate_expression(stmt->data.switch_stmt.expr);
+            int matched = 0;
+            ast_node *c = stmt->data.switch_stmt.cases;
+
+            // break dentro de switch no debe propagarse a loops externos
+            int saved_break = runtime_break_flag;
+            runtime_break_flag = 0;
+
+            for (; c; c = c->next) {
+                int is_def = c->data.case_stmt.is_default ? 1 : 0;
+                int cv = 0;
+                if (!is_def) {
+                    // si tu AST guarda literal directo, lee ese campo;
+                    // si es una expr, usa evaluate_expression(c->data.case_stmt.value)
+                    cv = evaluate_expression(c->data.case_stmt.value);
+                }
+                if (!matched) {
+                    if (is_def || cv == key) matched = 1;
+                    else continue;
+                }
+                // Ejecuta cuerpo de este case (fall-through hasta break)
+                if (c->data.case_stmt.body) execute_statement(c->data.case_stmt.body);
+                if (runtime_break_flag) {
+                    runtime_break_flag = 0; // consume break del switch
+                    break;
+                }
+            }
+            // restaurar estado de break externo
+            runtime_break_flag = saved_break;
+            break;
+        }*/
                 
         case AST_RETURN: {
             // minimal: evaluate expression (no stack handling implemented)
@@ -1449,6 +1488,7 @@ void execute_statement(ast_node *stmt) {
             }
             break;
         }
+        
 
         default:
             if (stmt->type == AST_BINARY_OP || stmt->type == AST_UNARY_OP || stmt->type == AST_VARIABLE || stmt->type == AST_INT_LITERAL) {
