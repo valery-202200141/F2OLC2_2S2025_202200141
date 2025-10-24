@@ -11,3 +11,34 @@ Strings: solo literals via printf; no concatenación ni equals en AST.
 aarch64-linux-gnu-as -o out_arm64.o out_arm64.s
 aarch64-linux-gnu-gcc -no-pie -o out_arm64 out_arm64.o
 qemu-aarch64 -L /usr/aarch64-linux-gnu ./out_arm64
+
+public static void main() {
+
+int a=2;
+int b=3;
+int c=a*b+1;
+
+print("c=");
+print(c);
+
+if (c >= 7) {
+  print("ge7");
+} else {
+  print("lt7");
+}
+
+int i=3;
+while (i >= 0) {
+  print(i);
+  i = i - 1;
+}
+
+int j=0;
+for (; j < 3; j = j + 1) {
+  print(j);
+}
+
+if (!(a==1) || (b<3 && c>0) || (b<3 && c>0)) {
+  print("logic");
+}
+}

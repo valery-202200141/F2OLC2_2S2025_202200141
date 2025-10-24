@@ -2,6 +2,9 @@
 #include <string.h>
 #include <stdio.h>
 
+
+static void sanitize_name(const char *src, char *dst, size_t n);
+
 // Entorno de variables locales (stack en [sp])
 typedef struct { char name[64]; int off; } LocalVar;
 typedef struct {
@@ -13,35 +16,135 @@ typedef struct {
 } VarEnv;
 
 static int env_find(VarEnv *e, const char *name){
-    for (int i=e->count-1;i>=0;--i) if (strcmp(e->vars[i].name,name)==0) return i;
+    // Busca usando nombre saneado contra el nombre almacenado (que ya está saneado)
+    char key[64]; sanitize_name(name ? name : "", key, sizeof(key));
+    if (!key[0]) return -1;
+    for (int i = e->count - 1; i >= 0; --i){
+        if (strcmp(e->vars[i].name, key) == 0) return i;
+    }
     return -1;
 }
+
+static int count_decls_in_node(ast_node *n);
+static int count_decls_in_list(ast_node *n){
+    int c = 0;
+    for (ast_node *cur=n; cur; cur=cur->next) c += count_decls_in_node(cur);
+    return c;
+}
+static int count_decls_in_node(ast_node *n){
+    if (!n) return 0;
+    int c = 0;
+    switch (n->type){
+        case AST_DECLARATION: c += 1; break;
+        case AST_COMPOUND_STMT:
+            c += count_decls_in_list(n->data.compound.statement_list); break;
+        case AST_IF:
+            c += count_decls_in_node(n->data.if_stmt.condition);
+            c += count_decls_in_node(n->data.if_stmt.then_branch);
+            c += count_decls_in_node(n->data.if_stmt.else_branch);
+            break;
+        case AST_WHILE:
+            c += count_decls_in_node(n->data.while_stmt.condition);
+            c += count_decls_in_node(n->data.while_stmt.body);
+            break;
+        case AST_FOR:
+            c += count_decls_in_node(n->data.for_stmt.init);
+            c += count_decls_in_node(n->data.for_stmt.condition);
+            c += count_decls_in_node(n->data.for_stmt.increment);
+            c += count_decls_in_node(n->data.for_stmt.body);
+            break;
+        case AST_PROGRAM:
+        case AST_MAIN_FUNCTION:
+            c += count_decls_in_node(n->data.function_def.body);
+            break;
+        default: break;
+    }
+    return c;
+}
+
+
 static int env_offset(VarEnv *e, const char *name){ int i=env_find(e,name); return i>=0? e->vars[i].off : -1; }
+
+// Añade un find/offset robusto
+static int env_offset_strict(VarEnv *e, CodegenARM64 *cg, const char *raw_name){
+    if (!raw_name) return -1;
+    char nm[64]; sanitize_name(raw_name, nm, sizeof(nm));
+    if (!nm[0]) return -1;
+
+    // 1) match directo con nombre almacenado (ya saneado)
+    for (int i = e->count - 1; i >= 0; --i){
+        if (strcmp(e->vars[i].name, nm) == 0) return e->vars[i].off;
+    }
+    // 2) por si acaso, compara contra raw (por si el almacenado llegó sin saneo en algún caso)
+    for (int i = e->count - 1; i >= 0; --i){
+        if (strcmp(e->vars[i].name, raw_name) == 0) return e->vars[i].off;
+    }
+
+    // Diagnóstico
+    fprintf(cg->out, "    // LOOKUP FAIL raw='%s' san='%s'. En entorno hay:\n", raw_name, nm);
+    for (int i = 0; i < e->count; ++i) {
+        fprintf(cg->out, "    //   [%d] name='%s' off=%d\n", i, e->vars[i].name, e->vars[i].off);
+    }
+    return -1;
+}
+
+
 static void env_push_scope(VarEnv *e){ e->scope_mark[e->sp++] = e->count; }
 
+static inline int align16(int n){ return (n + 15) & ~15; }
+
 static int  env_pop_scope(VarEnv *e, CodegenARM64 *cg){
+    // Ya NO movemos SP; solo olvidamos nombres fuera de scope
+    (void)cg;
     int from = e->scope_mark[--e->sp];
-    int nvars = e->count - from;
-    int bytes = nvars > 0 ? nvars * 16 : 0;
-    if (bytes) {
-        cg_local_free(cg, bytes);
-        e->local_bytes -= bytes;
-        if (e->local_bytes < 0) e->local_bytes = 0;
-    }
     e->count = from;
-    return bytes;
+    return 0;
+}
+
+static void env_dump(CodegenARM64 *cg, VarEnv *e, const char *tag){
+    if (!cg || !e) return;
+    fprintf(cg->out, "    // ENV DUMP [%s] count=%d local_bytes=%d\n", tag, e->count, e->local_bytes);
+    for (int i = 0; i < e->count; ++i){
+        fprintf(cg->out, "    //   #%d name='%s' off=%d\n", i, e->vars[i].name, e->vars[i].off);
+    }
+}
+
+static void sanitize_name(const char *src, char *dst, size_t n){
+    size_t j=0;
+    if (!dst || n==0){ return; }
+    if (!src){ dst[0]='\0'; return; }
+    for (size_t i=0; src[i] && j+1<n; ++i){
+        unsigned char c = (unsigned char)src[i];
+        if ((c>='A' && c<='Z') || (c>='a' && c<='z') || (c>='0' && c<='9') || c=='_'){
+            dst[j++] = (char)c;
+        }
+        // ignora cualquier otro caracter (espacios, ;, NBSP, etc.)
+    }
+    dst[j] = '\0';
+}
+
+static int is_print_like_call(ast_node *call){
+    if (!call || call->type != AST_METHOD_CALL) return 0;
+    const char *m = call->data.method_call.method_name;
+    if (!m) return 0;
+    return strcmp(m, "println") == 0 || strcmp(m, "print") == 0;
 }
 
 static int env_decl_int(VarEnv *e, CodegenARM64 *cg, const char *name){
     if (e->count>=256) return -1;
-    cg_local_alloc(cg, 16);
+    char nm[64]; sanitize_name(name ? name : "", nm, sizeof(nm));
+    if (!nm[0]) {
+        fprintf(cg->out, "    // ERROR: nombre de variable vacío en declaración, se omite\n");
+        return -1;
+    }
     e->local_bytes += 16;
-    int off = -e->local_bytes;  // [x29,#off] NEGATIVO
-    strncpy(e->vars[e->count].name, name, sizeof(e->vars[e->count].name)-1);
+    int off = -e->local_bytes;
+    strncpy(e->vars[e->count].name, nm, sizeof(e->vars[e->count].name)-1);
     e->vars[e->count].name[sizeof(e->vars[e->count].name)-1]='\0';
     e->vars[e->count].off = off;
     e->count++;
-    fprintf(cg->out, "    // decl %s @ [x29,#%d]\n", name, off);
+    fprintf(cg->out, "    // decl %s @ [x29,#%d]\n", nm, off);
+    env_dump(cg, e, "after-decl");
     return off;
 }
 
@@ -67,9 +170,11 @@ static int is_intish(ast_node *n){
 
 static void gen_print_int(CodegenARM64 *cg){
     // printf("%d\n", w0)
+    // 1) preserva el valor en w1 ANTES de clobber x0
+    fprintf(cg->out, "    mov  w1, w0\n");
+    // 2) ahora puedes cargar el formato en x0
     fprintf(cg->out, "    adrp x0, fmt_int\n");
     fprintf(cg->out, "    add  x0, x0, :lo12:fmt_int\n");
-    fprintf(cg->out, "    mov  w1, w0\n");
     fprintf(cg->out, "    bl   printf\n");
 }
 
@@ -126,6 +231,7 @@ static void gen_binop(CodegenARM64 *cg, VarEnv *env, ast_node *n){
     }
 }
 
+
 static void gen_expr(CodegenARM64 *cg, VarEnv *env, ast_node *n){
     if (!n){ fprintf(cg->out,"    mov w0, wzr\n"); return; }
     switch(n->type){
@@ -136,16 +242,19 @@ static void gen_expr(CodegenARM64 *cg, VarEnv *env, ast_node *n){
             fprintf(cg->out, "    mov w0, #%d\n", n->data.bool_value ? 1 : 0);
             break;
         case AST_VARIABLE: {
-            int off = env_offset(env, n->data.var_name);
+            env_dump(cg, env, "before-load");
+            const char *raw = n->data.var_name ? n->data.var_name : "";
+            int off = env_offset_strict(env, cg, raw);  // usar raw aquí
             if (off < 0){
-                fprintf(cg->out,"    // WARN: var not found '%s'\n", n->data.var_name);
+                fprintf(cg->out,"    // WARN: var not found '%s'\n", raw);
                 fprintf(cg->out,"    mov w0, wzr\n");
             } else {
-                fprintf(cg->out,"    // load %s @ [x29,#%d]\n", n->data.var_name, off);
+                fprintf(cg->out,"    // load %s @ [x29,#%d]\n", raw, off);
                 cg_load_local_w(cg, off, "w0");
             }
             break;
         }
+
         case AST_BINARY_OP:
             gen_binop(cg, env, n);
             break;
@@ -179,27 +288,38 @@ static void gen_stmt(CodegenARM64 *cg, VarEnv *env, ast_node *s){
     switch(s->type){
         case AST_DECLARATION: {
             int off = env_decl_int(env, cg, s->data.declaration.var_name);
-            if (s->data.declaration.value && off>=0){
+            // inicializa (0 si no hay valor)
+            if (s->data.declaration.value){
                 gen_expr(cg, env, s->data.declaration.value);
-                fprintf(cg->out, "    // store %s\n", s->data.declaration.var_name);
                 cg_store_local_w(cg, off, "w0");
-            } else if (off>=0){
+            } else {
                 fprintf(cg->out, "    mov w0, wzr\n");
                 cg_store_local_w(cg, off, "w0");
             }
+            // dump opcional
+            fprintf(cg->out, "    // ENV DUMP [after-decl-store] count=%d local_bytes=%d\n", env->count, env->local_bytes);
+            for (int i=0;i<env->count;i++){
+                fprintf(cg->out, "    //   #%d name='%s' off=%d\n", i, env->vars[i].name, env->vars[i].off);
+            }
             break;
         }
-
         case AST_ASSIGNMENT: {
-            int off = env_offset(env, s->data.assignment.var_name);
-            if (off < 0){
-                off = env_decl_int(env, cg, s->data.assignment.var_name);
-                fprintf(cg->out,"    // auto-decl %s\n", s->data.assignment.var_name);
-            } else {
-                fprintf(cg->out,"    // assign %s @ [x29,#%d]\n", s->data.assignment.var_name, off);
+            env_dump(cg, env, "before-assign");
+            const char *raw = s->data.assignment.var_name ? s->data.assignment.var_name : "";
+            char nm[64]; sanitize_name(raw, nm, sizeof(nm));
+            if (!nm[0]) {
+                fprintf(cg->out,"    // ERROR: nombre de variable vacío en asignación\n");
+                break;
             }
+            int off = env_offset_strict(env, cg, raw); // usar raw aquí también
+            if (off < 0){
+                fprintf(cg->out,"    // ERROR: var not found for assign '%s' (no auto-decl)\n", nm);
+                break;
+            }
+            fprintf(cg->out,"    // assign %s @ [x29,#%d]\n", nm, off);
             gen_expr(cg, env, s->data.assignment.value);
             cg_store_local_w(cg, off, "w0");
+            env_dump(cg, env, "after-assign");
             break;
         }
 
@@ -247,15 +367,39 @@ static void gen_stmt(CodegenARM64 *cg, VarEnv *env, ast_node *s){
         case AST_COMPOUND_STMT:
             gen_block(cg, env, s->data.compound.statement_list);
             break;
+
+        case AST_METHOD_CALL: {
+            // Soporte directo: System.out.println(x) / println(x) -> printf
+            if (is_print_like_call(s)) {
+                ast_node *arg = s->data.method_call.arg;
+                if (!arg) {
+                    codegen_arm64_println_string(cg, "");
+                } else if (arg->type == AST_STRING_LITERAL) {
+                    gen_print_cstr(cg, arg->data.string_value);
+                } else {
+                    // por defecto: evaluar como entero
+                    gen_expr(cg, env, arg);
+                    gen_print_int(cg);
+                }
+            } else {
+                // otros method_call como expr (no generan salida)
+                // opcional: gen_expr(cg, env, s) si fuera útil
+            }
+            break;
+        }
         case AST_PRINT_STMT: {
             ast_node *e = s->data.print_stmt.expression;
-            if (e && is_intish(e)){
+            if (!e) {
+                codegen_arm64_println_string(cg, "");
+            } else if (e && is_intish(e)){
                 gen_expr(cg, env, e);
                 gen_print_int(cg);
             } else if (e && e->type == AST_STRING_LITERAL){
                 gen_print_cstr(cg, e->data.string_value);
             } else {
-                gen_print_cstr(cg, "UNSUPPORTED");
+                // si no sabemos el tipo, imprime como entero
+                gen_expr(cg, env, e);
+                gen_print_int(cg);
             }
             break;
         }
@@ -274,13 +418,20 @@ static void gen_stmt(CodegenARM64 *cg, VarEnv *env, ast_node *s){
 int codegen_arm64_generate(ast_node *root, const char *out_path){
     CodegenARM64 cg;
     if (codegen_arm64_begin(&cg, out_path?out_path:"reports/out_arm64.s") != 0) return -1;
-    VarEnv env = (VarEnv){0};
-    if (root){
-        if (root->type == AST_PROGRAM && root->data.function_def.body)
-            gen_block(&cg, &env, root->data.function_def.body);
-        else
-            gen_block(&cg, &env, root);
+
+    // Seleccionar body ejecutable (fix: asigna realmente body)
+    ast_node *body = root;
+    if (root && (root->type==AST_PROGRAM || root->type==AST_MAIN_FUNCTION) && root->data.function_def.body) {
+        body = root->data.function_def.body;
     }
+
+    int locals = count_decls_in_list(body);
+    int frame  = align16(locals * 16);
+    if (frame > 0) cg_local_alloc(&cg, frame);
+
+    VarEnv env = (VarEnv){0};
+    if (body) gen_block(&cg, &env, body);
+
     codegen_arm64_end(&cg);
     return 0;
 }

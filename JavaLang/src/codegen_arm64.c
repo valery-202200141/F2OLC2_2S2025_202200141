@@ -17,7 +17,7 @@ static void ensure_text(CodegenARM64 *cg) {
 }
 
 static void ensure_data(CodegenARM64 *cg) {
-    asmf(cg, ".data");
+    asmf(cg, ".data"); // opcional: usar .rodata para literales
     cg->text_opened = false;
 }
 
@@ -60,6 +60,9 @@ void codegen_arm64_emit_prologue(CodegenARM64 *cg) {
 void codegen_arm64_emit_epilogue(CodegenARM64 *cg) {
     if (cg->epilogue_emitted) return;
     ensure_text(cg);
+    if (cg->stack_bytes > 0) {
+        fprintf(cg->out, "    add sp, sp, #%d\n", cg->stack_bytes);
+    }
     asmf(cg, "    mov w0, #0\n");
     asmf(cg, "    ldp x29, x30, [sp], #16\n");
     asmf(cg, "    ret\n");
@@ -72,6 +75,18 @@ void codegen_arm64_end(CodegenARM64 *cg) {
     fclose(cg->out);
     cg->out = NULL;
 }
+
+static void sanitize_name(const char *src, char *dst, size_t n){
+    size_t j=0;
+    for (size_t i=0; src && src[i] && j+1<n; ++i){
+        unsigned char c = (unsigned char)src[i];
+        if (c==' ' || c=='\t' || c=='\r' || c=='\n') continue;
+        dst[j++] = (char)c;
+    }
+    dst[j] = '\0';
+}
+
+
 
 // Helper: emite literal string y devuelve su etiqueta
 static void emit_str_literal(CodegenARM64 *cg, const char *s, char label[32]) {
@@ -94,11 +109,10 @@ static void emit_str_literal(CodegenARM64 *cg, const char *s, char label[32]) {
 
 void codegen_arm64_println_int(CodegenARM64 *cg, long value) {
     ensure_text(cg);
-    // x0 = &fmt_int ; w1 = value ; bl printf
-    asmf(cg, "    adrp x0, fmt_int\n");
-    asmf(cg, "    add  x0, x0, :lo12:fmt_int\n");
-    fprintf(cg->out, "    ldr  w1, =%ld\n", value);
-    asmf(cg, "    bl   printf\n");
+    fprintf(cg->out, "    mov  w1, #%ld\n", value);
+    fprintf(cg->out, "    adrp x0, fmt_int\n");
+    fprintf(cg->out, "    add  x0, x0, :lo12:fmt_int\n");
+    fprintf(cg->out, "    bl   printf\n");
 }
 
 void codegen_arm64_println_double(CodegenARM64 *cg, double value) {

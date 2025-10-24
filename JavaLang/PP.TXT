@@ -2,8 +2,7 @@
 unset LD_LIBRARY_PATH
 unset GTK_PATH
 unset GIO_MODULE_DIR
-make clean
-make ./javalang
+make clean && make
 ./javalang
 
  env -i HOME="$HOME" PATH="/usr/bin:/bin:/usr/local/bin" DISPLAY="$DISPLAY" ./javalang

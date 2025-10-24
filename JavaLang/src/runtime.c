@@ -1434,6 +1434,22 @@ void execute_statement(ast_node *stmt) {
             break;
         }
 
+        case AST_METHOD_CALL: {
+            const char *m = stmt->data.method_call.method_name;
+            if (m && (!strcmp(m, "print") || !strcmp(m, "println"))) {
+                ast_node *arg = stmt->data.method_call.arg;
+                if (!arg) {
+                    runtime_println_string_gui("");
+                } else {
+                    char *s = get_string_value(arg);
+                    runtime_println_string_gui(s ? s : "");
+                }
+            } else {
+                (void)evaluate_expression(stmt); // otros métodos -> evalúa sin imprimir
+            }
+            break;
+        }
+
         default:
             if (stmt->type == AST_BINARY_OP || stmt->type == AST_UNARY_OP || stmt->type == AST_VARIABLE || stmt->type == AST_INT_LITERAL) {
                 (void)evaluate_expression(stmt);
