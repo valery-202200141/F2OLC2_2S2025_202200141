@@ -35,6 +35,10 @@ void cg_local_alloc(CodegenARM64*, int bytes);
 void cg_local_free (CodegenARM64*, int bytes);
 void cg_store_local_w(CodegenARM64*, int off, const char *wreg);
 void cg_load_local_w (CodegenARM64*, int off, const char *wreg);
+void cg_store_local_x(CodegenARM64*, int off, const char *xreg);
+void cg_load_local_x (CodegenARM64*, int off, const char *xreg);
+void cg_store_local_d(CodegenARM64*, int off, const char *dreg);
+void cg_load_local_d (CodegenARM64*, int off, const char *dreg);
 
 // exprs/booleanos
 void cg_binop_int(CodegenARM64*, const char *op, const char *wa, const char *wb, const char *wd);
@@ -77,6 +81,16 @@ void cg_return_void   (CodegenARM64*);
 void cg_switch_begin(CodegenARM64*, char *Lend, size_t, char *Ldef, size_t);
 void cg_switch_case_imm(CodegenARM64*, int imm, const char *Lcase);
 void cg_switch_goto_end(CodegenARM64*, const char *Lend);
+
+void cg_store_local_w(CodegenARM64*, int off, const char *wreg);
+void cg_load_local_w (CodegenARM64*, int off, const char *wreg);
+
+void cg_store_local_x(CodegenARM64*, int off, const char *xreg);
+void cg_load_local_x (CodegenARM64*, int off, const char *xreg);
+
+void cg_store_local_d(CodegenARM64*, int off, const char *dreg);
+void cg_load_local_d (CodegenARM64*, int off, const char *dreg);
+
 
 
 // helpers ASM

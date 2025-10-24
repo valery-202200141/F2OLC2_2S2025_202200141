@@ -91,18 +91,31 @@ static void sanitize_name(const char *src, char *dst, size_t n){
 // Helper: emite literal string y devuelve su etiqueta
 static void emit_str_literal(CodegenARM64 *cg, const char *s, char label[32]) {
     snprintf(label, 32, "str_%u", ++cg->str_count);
-    // CAMBIO: usa ensure_data/ensure_text para mantener el estado de sección
     ensure_data(cg);
     fprintf(cg->out, "%s: .asciz \"", label);
-    for (const unsigned char *p = (const unsigned char*)s; *p; ++p) {
-        unsigned char c = *p;
-        if (c == '\"' || c == '\\') fprintf(cg->out, "\\%c", c);
-        else if (c == '\n') fputs("\\n", cg->out);
-        else if (c == '\r') fputs("\\r", cg->out);
-        else if (c == '\t') fputs("\\t", cg->out);
-        else if (c < 32 || c >= 127) fprintf(cg->out, "\\x%02X", c);
-        else fputc(c, cg->out);
+
+    // Interpretar secuencias de escape del source y emitir escapes válidos para el ensamblador
+    for (size_t i = 0; s && s[i]; ++i) {
+        unsigned char c = (unsigned char)s[i];
+        if (c == '\\' && s[i+1]) {
+            char e = s[++i];
+            switch (e) {
+                case 'n':  fputs("\\n",  cg->out); break;
+                case 't':  fputs("\\t",  cg->out); break;
+                case 'r':  fputs("\\r",  cg->out); break;
+                case '\\': fputs("\\\\", cg->out); break;
+                case '"':  fputs("\\\"", cg->out); break;
+                default:   fprintf(cg->out, "\\%c", e); break; // deja otras secuencias como están
+            }
+        } else if (c == '"') {
+            fputs("\\\"", cg->out);
+        } else if (c < 32 || c >= 127) {
+            fprintf(cg->out, "\\x%02X", c);
+        } else {
+            fputc(c, cg->out);
+        }
     }
+
     fputs("\"\n", cg->out);
     ensure_text(cg);
 }
@@ -144,18 +157,79 @@ void codegen_arm64_println_string(CodegenARM64 *cg, const char *utf8) {
 }
 
 // ===== Helpers de locales y control de flujo (pegar al final) =====
-void cg_local_alloc(CodegenARM64 *cg, int bytes){ if(bytes>0){ ensure_text(cg); fprintf(cg->out,"    sub sp, sp, #%d\n",bytes); cg->stack_bytes+=bytes; } }
-void cg_local_free (CodegenARM64 *cg, int bytes){ if(bytes>0){ ensure_text(cg); fprintf(cg->out,"    add sp, sp, #%d\n",bytes); cg->stack_bytes-=bytes; } }
-void cg_store_local_w(CodegenARM64 *cg, int off, const char *wreg){
-    ensure_text(cg);
-    // locales estables: base FP (x29), offset NEGATIVO
-    fprintf(cg->out, "    str %s, [x29, #%d]\n", wreg, off);
+void cg_local_alloc(CodegenARM64 *cg, int bytes){
+    if (bytes > 0){
+        int a = (bytes + 15) & ~15;      // redondeo a 16
+        ensure_text(cg);
+        fprintf(cg->out,"    sub sp, sp, #%d\n", a);
+        cg->stack_bytes += a;
+    }
 }
 
+void cg_local_free (CodegenARM64 *cg, int bytes){ 
+    if(bytes>0){
+        int a = (bytes + 15) & ~15;      // redondeo a 16
+        ensure_text(cg);
+        fprintf(cg->out,"    add sp, sp, #%d\n", a);
+        cg->stack_bytes -= a;
+    }
+}
+
+
+
+static inline int fits_signed9(int off) { return off >= -256 && off <= 255; }
+// para w (32-bit): inm escalar 12b * 4 => 0..16380 y múltiplo de 4
+static inline int fits_w_scaled12(int off) { return off >= 0 && off <= 16380 && (off % 4) == 0; }
+
+static inline int fits_x_scaled12(int off) { return off >= 0 && off <= 32760 && (off % 8) == 0; }
+
+void cg_store_local_w(CodegenARM64 *cg, int off, const char *wreg){
+    ensure_text(cg);
+    if (fits_signed9(off)) { fprintf(cg->out, "    str %s, [x29, #%d]\n", wreg, off); return; }
+    if (off < 0) fprintf(cg->out, "    sub x9, x29, #%d\n", -off);
+    else         fprintf(cg->out, "    add x9, x29, #%d\n",  off);
+    fprintf(cg->out, "    str %s, [x9]\n", wreg);
+}
 void cg_load_local_w(CodegenARM64 *cg, int off, const char *wreg){
     ensure_text(cg);
-    fprintf(cg->out, "    ldr %s, [x29, #%d]\n", wreg, off);
+    if (fits_signed9(off)) { fprintf(cg->out, "    ldr %s, [x29, #%d]\n", wreg, off); return; }
+    if (off < 0) fprintf(cg->out, "    sub x9, x29, #%d\n", -off);
+    else         fprintf(cg->out, "    add x9, x29, #%d\n",  off);
+    fprintf(cg->out, "    ldr %s, [x9]\n", wreg);
 }
+
+void cg_store_local_x(CodegenARM64 *cg, int off, const char *xreg){
+    ensure_text(cg);
+    if (fits_signed9(off)) { fprintf(cg->out, "    str %s, [x29, #%d]\n", xreg, off); return; }
+    if (off < 0) fprintf(cg->out, "    sub x9, x29, #%d\n", -off);
+    else         fprintf(cg->out, "    add x9, x29, #%d\n",  off);
+    fprintf(cg->out, "    str %s, [x9]\n", xreg);
+}
+
+void cg_load_local_x(CodegenARM64 *cg, int off, const char *xreg){
+    ensure_text(cg);
+    if (fits_signed9(off)) { fprintf(cg->out, "    ldr %s, [x29, #%d]\n", xreg, off); return; }
+    if (off < 0) fprintf(cg->out, "    sub x9, x29, #%d\n", -off);
+    else         fprintf(cg->out, "    add x9, x29, #%d\n",  off);
+    fprintf(cg->out, "    ldr %s, [x9]\n", xreg);
+}
+
+void cg_store_local_d(CodegenARM64 *cg, int off, const char *dreg){
+    ensure_text(cg);
+    if (fits_signed9(off)) { fprintf(cg->out, "    str %s, [x29, #%d]\n", dreg, off); return; }
+    if (off < 0) fprintf(cg->out, "    sub x9, x29, #%d\n", -off);
+    else         fprintf(cg->out, "    add x9, x29, #%d\n",  off);
+    fprintf(cg->out, "    str %s, [x9]\n", dreg);
+}
+
+void cg_load_local_d(CodegenARM64 *cg, int off, const char *dreg){
+    ensure_text(cg);
+    if (fits_signed9(off)) { fprintf(cg->out, "    ldr %s, [x29, #%d]\n", dreg, off); return; }
+    if (off < 0) fprintf(cg->out, "    sub x9, x29, #%d\n", -off);
+    else         fprintf(cg->out, "    add x9, x29, #%d\n",  off);
+    fprintf(cg->out, "    ldr %s, [x9]\n", dreg);
+}
+
 
 void cg_cmp_int(CodegenARM64 *cg, const char *cond, const char *wa, const char *wb){
     ensure_text(cg);
@@ -232,8 +306,8 @@ void cg_binop_int(CodegenARM64 *cg, const char *op, const char *wa, const char *
     else if(!strcmp(op,"*")) fprintf(cg->out,"    mul %s, %s, %s\n",wd,wa,wb);
     else if(!strcmp(op,"/")) fprintf(cg->out,"    sdiv %s, %s, %s\n",wd,wa,wb);
     else if(!strcmp(op,"%%")){
-    fprintf(cg->out,"    sdiv w9, %s, %s\n",wa,wb);
-    fprintf(cg->out,"    msub %s, w9, %s, %s\n",wd,wb,wa); // wd = a - (a/b)*b
+    fprintf(cg->out,"    sdiv w9, %s, %s\n", wa, wb);
+    fprintf(cg->out,"    msub %s, w9, %s, %s\n", wd, wb, wa); // wd = a - (a/b)*b
 }
 }
 
